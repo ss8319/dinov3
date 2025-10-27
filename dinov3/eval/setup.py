@@ -21,6 +21,11 @@ class ModelConfig:
     pretrained_weights: str | None = None
     # Loading a DINOv3 or v2 model from torch.hub
     dino_hub: str | None = None
+    # Loading from a LOCAL torch.hub repository (no internet required)
+    # Point to the local path containing a hubconf.py (e.g., the dinov3 repo root)
+    hub_repo_dir: str | None = None
+    # Model entry name from hubconf (e.g., "dinov3_vitb16"). If None, falls back to dino_hub
+    hub_model: str | None = None
 
 
 class BaseModelContext(TypedDict):
@@ -32,7 +37,15 @@ class BaseModelContext(TypedDict):
 
 
 def load_model_and_context(model_config: ModelConfig, output_dir: str) -> tuple[torch.nn.Module, BaseModelContext]:
-    if model_config.dino_hub is not None:
+    # Prefer loading from a local torch.hub repository if provided
+    if model_config.hub_repo_dir is not None:
+        model_name = model_config.hub_model or model_config.dino_hub
+        if model_name is None:
+            raise ValueError("When using hub_repo_dir, you must provide hub_model or dino_hub as the model entry name")
+        # Load via local torch.hub (source='local') and pass local weights path
+        model = torch.hub.load(model_config.hub_repo_dir, model_name, source='local', weights=model_config.pretrained_weights)
+        base_model_context = BaseModelContext(autocast_dtype=torch.float)
+    elif model_config.dino_hub is not None:
         assert model_config.pretrained_weights is None and model_config.config_file is None
         if "dinov3" in model_config.dino_hub:
             repo = "dinov3"

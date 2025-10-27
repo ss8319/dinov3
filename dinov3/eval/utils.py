@@ -164,6 +164,22 @@ def all_gather_and_flatten(tensor_rank):
 
 
 def extract_features(model, dataset, batch_size, num_workers, gather_on_cpu=False):
+    # Check if this is an ADNI dataset (3D volumes requiring slice aggregation)
+    from dinov3.data.datasets import ADNI
+    if isinstance(dataset, ADNI):
+        logger.info("Detected ADNI dataset - using slice-wise aggregation")
+        from dinov3.data.datasets.adni_3d_aggregation import extract_features_with_slice_aggregation
+        # Extract features with slice aggregation (returns already gathered features)
+        features, labels = extract_features_with_slice_aggregation(
+            model=model,
+            dataset=dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            device="cuda" if not gather_on_cpu else "cpu"
+        )
+        return features, labels
+    
+    # Standard 2D image feature extraction
     dataset_with_enumerated_targets = DatasetWithEnumeratedTargets(dataset)
     sample_count = len(dataset_with_enumerated_targets)
     data_loader = make_data_loader(
