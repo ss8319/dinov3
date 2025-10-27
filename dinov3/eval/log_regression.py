@@ -155,6 +155,87 @@ def evaluate_logreg_model(*, logreg_model, test_metric, test_data_loader, save_r
     )
     if save_results_func is not None:
         save_results_func(**accumulated_results[key])
+    
+    # Compute additional binary classification metrics
+    from sklearn.metrics import (
+        balanced_accuracy_score,
+        matthews_corrcoef,
+        roc_auc_score,
+        f1_score,
+        precision_score,
+        recall_score,
+        confusion_matrix
+    )
+    
+    # Collect all predictions and targets
+    logreg_model.eval()
+    all_preds = []
+    all_targets = []
+    all_probas = []
+    
+    with torch.no_grad():
+        for batch in test_data_loader:
+            if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                samples, targets = batch
+            else:
+                samples = batch
+                targets = None
+            
+            # Get predictions
+            output = logreg_model(samples, targets)
+            probas = output["preds"]
+            preds = probas.argmax(dim=-1)
+            
+            all_preds.append(preds.cpu())
+            all_probas.append(probas.cpu())
+            
+            if targets is not None:
+                # Handle both tensor and list targets
+                if isinstance(targets, torch.Tensor):
+                    # Ensure targets shape matches preds (handle scalar tensors)
+                    if targets.dim() == 0:
+                        # Scalar tensor - expand to match batch
+                        all_targets.append(targets.unsqueeze(0).expand_as(preds).cpu())
+                    else:
+                        all_targets.append(targets.cpu())
+                elif isinstance(targets, (list, tuple)):
+                    # Convert to tensor with proper shape
+                    targets_tensor = torch.tensor(targets)
+                    if targets_tensor.dim() == 0:
+                        # Single value - expand to match batch
+                        all_targets.append(targets_tensor.unsqueeze(0).expand_as(preds).cpu())
+                    else:
+                        all_targets.append(targets_tensor.cpu())
+                else:
+                    # Scalar value - expand to match batch
+                    all_targets.append(torch.tensor([targets]).expand_as(preds))
+    
+    if len(all_targets) > 0:
+        all_preds = torch.cat(all_preds)
+        all_targets = torch.cat(all_targets)
+        all_probas = torch.cat(all_probas)
+        
+        # Convert to numpy for sklearn
+        preds_np = all_preds.numpy()
+        targets_np = all_targets.numpy()
+        probas_np = all_probas.numpy()[:, 1]  # Probabilities for positive class
+        
+        # Calculate metrics
+        balanced_acc = balanced_accuracy_score(targets_np, preds_np)
+        mcc = matthews_corrcoef(targets_np, preds_np)
+        auc_roc = roc_auc_score(targets_np, probas_np)
+        f1 = f1_score(targets_np, preds_np)
+        precision = precision_score(targets_np, preds_np)
+        recall = recall_score(targets_np, preds_np)
+        
+        # Add to eval_metrics
+        eval_metrics["metrics"]["balanced_accuracy"] = torch.tensor(balanced_acc)
+        eval_metrics["metrics"]["mcc"] = torch.tensor(mcc)
+        eval_metrics["metrics"]["auc_roc"] = torch.tensor(auc_roc)
+        eval_metrics["metrics"]["f1"] = torch.tensor(f1)
+        eval_metrics["metrics"]["precision"] = torch.tensor(precision)
+        eval_metrics["metrics"]["recall"] = torch.tensor(recall)
+    
     return eval_metrics
 
 

@@ -320,6 +320,71 @@ class Evaluator:
             accumulate_results=accumulate_results,
         )
 
+        # Compute additional binary classification metrics if applicable
+        if num_classes == 2 and accumulated_results is not None:
+            from sklearn.metrics import (
+                balanced_accuracy_score,
+                matthews_corrcoef,
+                roc_auc_score,
+                f1_score,
+                precision_score,
+                recall_score
+            )
+            
+            # Collect predictions and targets from accumulated_results
+            # accumulated_results should be a dict like {classifier_name: {'preds': ..., 'target': ...}}
+            for classifier_string, classifier_results in accumulated_results.items():
+                if "preds" in classifier_results and "target" in classifier_results:
+                    preds_tensor = classifier_results["preds"]
+                    targets_tensor = classifier_results["target"]
+                    
+                    # Convert to numpy
+                    preds = preds_tensor.cpu().numpy()
+                    targets = targets_tensor.cpu().numpy()
+                    
+                    # Ensure shapes are compatible
+                    if len(preds.shape) == 2 and preds.shape[1] == 2:
+                        # Convert probabilities to binary predictions
+                        preds_binary = preds.argmax(axis=1)
+                        probas_pos = preds[:, 1]  # Probabilities for positive class
+                    else:
+                        # Already binary predictions
+                        preds_binary = preds
+                        probas_pos = preds.astype(float)
+                    
+                    # Ensure targets match preds length
+                    if targets.ndim > 1:
+                        targets = targets.flatten()
+                    if preds_binary.ndim > 1:
+                        preds_binary = preds_binary.flatten()
+                    
+                    # Truncate to same length if needed
+                    min_len = min(len(targets), len(preds_binary))
+                    if min_len > 0:
+                        targets = targets[:min_len]
+                        preds_binary = preds_binary[:min_len]
+                        probas_pos = probas_pos[:min_len]
+                        
+                        # Calculate binary metrics
+                        try:
+                            balanced_acc = balanced_accuracy_score(targets, preds_binary)
+                            mcc = matthews_corrcoef(targets, preds_binary)
+                            auc_roc = roc_auc_score(targets, probas_pos)
+                            f1 = f1_score(targets, preds_binary)
+                            precision = precision_score(targets, preds_binary)
+                            recall = recall_score(targets, preds_binary)
+                            
+                            # Add to results_dict_temp
+                            if classifier_string in results_dict_temp:
+                                results_dict_temp[classifier_string]["balanced_accuracy"] = torch.tensor(balanced_acc)
+                                results_dict_temp[classifier_string]["mcc"] = torch.tensor(mcc)
+                                results_dict_temp[classifier_string]["auc_roc"] = torch.tensor(auc_roc)
+                                results_dict_temp[classifier_string]["f1"] = torch.tensor(f1)
+                                results_dict_temp[classifier_string]["precision"] = torch.tensor(precision)
+                                results_dict_temp[classifier_string]["recall"] = torch.tensor(recall)
+                        except Exception as e:
+                            logger.warning(f"Could not calculate binary metrics for {classifier_string}: {e}")
+
         logger.info("")
         results_dict = {}
         max_accuracy = 0
