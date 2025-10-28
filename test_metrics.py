@@ -37,11 +37,11 @@ def test_metrics_calculation():
             # Tensor targets (most common case)
             targets = torch.randint(0, 2, (batch_size,))
         elif i == 1:
-            # List targets
+            # List with multiple elements
             targets = [0, 1]  # List
         else:
-            # Scalar target value
-            targets = 1
+            # Single element list - THIS IS THE PROBLEMATIC CASE
+            targets = [1]  # Single element list
         
         all_preds.append(preds.cpu())
         all_probas.append(probas.cpu())
@@ -58,14 +58,18 @@ def test_metrics_calculation():
             elif isinstance(targets, (list, tuple)):
                 # Convert to tensor with proper shape
                 targets_tensor = torch.tensor(targets)
-                if targets_tensor.dim() == 0:
-                    # Single value - expand to match batch
-                    all_targets.append(targets_tensor.unsqueeze(0).expand_as(preds).cpu())
-                else:
-                    all_targets.append(targets_tensor.cpu())
+                # Check if it's a single element that needs to be expanded
+                if targets_tensor.numel() == 1:
+                    # Single element - expand to match batch size
+                    targets_tensor = targets_tensor.expand_as(preds)
+                all_targets.append(targets_tensor.cpu())
             else:
                 # Scalar value - expand to match batch
-                all_targets.append(torch.tensor([targets]).expand_as(preds))
+                scalar_tensor = torch.tensor(targets)
+                if scalar_tensor.numel() == 1:
+                    all_targets.append(scalar_tensor.expand_as(preds).cpu())
+                else:
+                    all_targets.append(scalar_tensor.cpu())
     
     print(f"all_preds: {[p.shape for p in all_preds]}")
     print(f"all_targets: {[t.shape for t in all_targets]}")
