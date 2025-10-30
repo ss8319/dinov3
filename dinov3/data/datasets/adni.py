@@ -18,10 +18,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 import pandas as pd
-import nibabel as nib
 import numpy as np
-import torch
-from PIL import Image
 
 from .decoders import ImageDataDecoder, TargetDecoder
 from .extended import ExtendedVisionDataset
@@ -42,39 +39,11 @@ class _Split(Enum):
 
 
 class NiftiImageDecoder:
-    """Decoder for NIfTI (.nii.gz) medical images"""
-    
+    """Deprecated: image decoding is handled by the slice aggregation dataset."""
     def __init__(self):
         pass
-    
     def decode(self, image_path: str) -> np.ndarray:
-        """
-        Load and decode a NIfTI image.
-        
-        Args:
-            image_path: Path to .nii.gz file
-            
-        Returns:
-            numpy array of shape (D, H, W) for 3D volume
-        """
-        try:
-            # Load NIfTI file
-            nii_img = nib.load(image_path)
-            img_data = nii_img.get_fdata()
-            
-            # Ensure 3D volume (D, H, W)
-            if img_data.ndim == 4:
-                # Take first volume if 4D
-                img_data = img_data[..., 0]
-            
-            # Convert to float32
-            img_data = img_data.astype(np.float32)
-            
-            return img_data
-            
-        except Exception as e:
-            logger.error(f"Error loading NIfTI image {image_path}: {e}")
-            raise
+        raise RuntimeError("NiftiImageDecoder is deprecated in favor of MONAI pipeline")
 
 
 class ADNI(ExtendedVisionDataset):
@@ -190,55 +159,6 @@ class ADNI(ExtendedVisionDataset):
         return len(self._get_entries())
     
     def __getitem__(self, index: int):
-        """
-        Get a sample from the dataset.
-        
-        Returns:
-            tuple: (image, target) where image is the transformed NIfTI volume
-        """
-        # Get image path and label
-        image_relpath = self.get_image_relpath(index)
-        target = self.get_target(index)
-        
-        # Load image
-        image_path = os.path.join(self.root, image_relpath)
-        
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
-        
-        # Load NIfTI image (3D volume)
-        nii_img = nib.load(image_path)
-        volume = nii_img.get_fdata().astype(np.float32)
-        
-        # If 4D, take first volume
-        if volume.ndim == 4:
-            volume = volume[..., 0]
-        
-        # Normalize volume to [0, 255] range for consistency with RGB images
-        volume_min, volume_max = volume.min(), volume.max()
-        if volume_max > volume_min:
-            volume = 255.0 * (volume - volume_min) / (volume_max - volume_min)
-        
-        # Extract middle axial slice (sagittal dimension, assuming shape is [D, H, W])
-        # This gives us a 2D slice of shape (H, W)
-        middle_idx = volume.shape[0] // 2
-        slice_2d = volume[middle_idx, :, :]  # Shape: (H, W)
-        
-        # Convert grayscale slice to 3-channel "RGB" by replication
-        # DINOv3 expects (H, W, 3) for RGB images
-        slice_rgb = np.stack([slice_2d, slice_2d, slice_2d], axis=-1).astype(np.uint8)  # Shape: (H, W, 3)
-        
-        # Convert to PIL Image (DINOv3 transforms expect PIL Images)
-        image = Image.fromarray(slice_rgb, mode='RGB')
-        
-        # Apply transforms
-        if self.transforms is not None:
-            image, target = self.transforms(image, target)
-        else:
-            if self.transform is not None:
-                image = self.transform(image)
-            if self.target_transform is not None:
-                target = self.target_transform(target)
-        
-        return image, target
+        """This dataset now serves as an index provider; use SliceAggregationDataset for I/O."""
+        raise RuntimeError("ADNI.__getitem__ is not supported; use SliceAggregationDataset for loading")
 
