@@ -47,6 +47,7 @@ class SliceAggregationDataset:
         slice_axis: Which axis to slice along (0=sagittal, 1=coronal, 2=axial)
         stride: Slice stride (e.g., 2 = every other slice). Default: 1 (all slices)
         transform: Transform to apply to each 2D slice
+        target_transform: Transform to apply to labels
     """
     
     def __init__(
@@ -55,11 +56,13 @@ class SliceAggregationDataset:
         slice_axis: int = 0,
         stride: int = 1,
         transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
     ):
         self.base_dataset = base_dataset
         self.slice_axis = slice_axis
         self.stride = stride
         self.transform = transform
+        self.target_transform = target_transform
 
         # MONAI pipeline for 3D volumes: load -> orient -> normalize to [0,1]
         self._monai = Compose(
@@ -141,6 +144,10 @@ class SliceAggregationDataset:
                 slice_tensor = torch.from_numpy(np.array(slice_pil)).permute(2, 0, 1)
             
             slices.append(slice_tensor)
+        
+        # Apply target transform if provided
+        if self.target_transform is not None:
+            target = self.target_transform(target)
         
         return slices, target
 
