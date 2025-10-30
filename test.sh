@@ -34,8 +34,9 @@ mkdir -p logs
 # Set paths
 DINOV3_ROOT="/home/ssim0068/multimodal-AD/src/mri/dinov3"
 DATA_ROOT="/home/ssim0068/data/ADNI_v2"
-WEIGHTS_PATH="${DINOV3_ROOT}/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
-# WEIGHTS_PATH="${DINOV3_ROOT}/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
+# WEIGHTS_PATH="${DINOV3_ROOT}/weights/dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth"
+# WEIGHTS_PATH="${DINOV3_ROOT}/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth"
+WEIGHTS_PATH="${DINOV3_ROOT}/weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth"
 
 # Dataset size control: "tiny", "small", or "full"
 DATASET_SIZE="${DATASET_SIZE:-full}"
@@ -79,19 +80,27 @@ echo "==================================="
 # Navigate to multimodal root for uv environment
 cd /home/ssim0068/multimodal-AD
 
+# Detect device (prefer CUDA if available)
+if command -v nvidia-smi >/dev/null 2>&1 && [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
+  FEATURES_DEVICE=cuda
+else
+  FEATURES_DEVICE=cpu
+fi
+
 # Run DINOv3 log regression with minimal data (smoke test)
 echo "Starting DINOv3 log regression test..."
+echo "Using features device: ${FEATURES_DEVICE}"
 echo ""
 
 PYTHONPATH=${DINOV3_ROOT} uv run python -m dinov3.eval.log_regression \
   model.hub_repo_dir=${DINOV3_ROOT} \
-  model.hub_model=dinov3_vitb16 \
+  model.hub_model=dinov3_vits16 \
   model.pretrained_weights="${WEIGHTS_PATH}" \
   train.dataset="ADNI:split=TRAIN:root=${DATA_ROOT}/images_mni305:extra=${DATA_ROOT}/csvs:csv_filename=${TRAIN_CSV}" \
   train.val_dataset="ADNI:split=VAL:root=${DATA_ROOT}/images_mni305:extra=${DATA_ROOT}/csvs:csv_filename=${VAL_CSV}" \
   eval.test_dataset="ADNI:split=TEST:root=${DATA_ROOT}/images_mni305:extra=${DATA_ROOT}/csvs:csv_filename=${TEST_CSV}" \
   train.batch_size=${BATCH_SIZE} \
-  train.train_features_device=cpu \
+  train.train_features_device=${FEATURES_DEVICE} \
   train.train_dtype=float32 \
   train.max_train_iters=${MAX_ITERS} \
   output_dir="${OUTPUT_DIR}" \
