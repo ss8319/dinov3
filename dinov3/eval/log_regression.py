@@ -6,7 +6,7 @@
 import logging
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Dict, List, Optional
 import numpy as np
@@ -563,6 +563,8 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
 
     results_dict = {}
     for _try in train_data_dict.keys():
+        # Always train sklearn on CPU regardless of feature extraction device since sklearn only works for CPU
+        cpu_train_config = replace(config.train, train_features_device="cpu")
         logreg_model = get_best_logreg_with_features(
             train_features=train_data_dict[_try]["train_features"],
             train_labels=train_data_dict[_try]["train_labels"],
@@ -570,7 +572,7 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
             val_labels=val_labels,
             val_metric=val_metric,
             concatenate_train_val=not config.few_shot.enable,
-            train_config=config.train,
+            train_config=cpu_train_config,
             output_dir=config.output_dir,
         )
         if len(train_data_dict) > 1 and save_results_func is not None:  # add suffix
