@@ -37,15 +37,6 @@ class _Split(Enum):
         """Return the CSV filename for this split"""
         return f"ad_{self.value}.csv"
 
-
-class NiftiImageDecoder:
-    """Deprecated: image decoding is handled by the slice aggregation dataset."""
-    def __init__(self):
-        pass
-    def decode(self, image_path: str) -> np.ndarray:
-        raise RuntimeError("NiftiImageDecoder is deprecated in favor of MONAI pipeline")
-
-
 class ADNI(ExtendedVisionDataset):
     """
     ADNI Dataset for Alzheimer's Disease binary classification.
