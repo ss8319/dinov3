@@ -6,10 +6,10 @@
 import logging
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Dict, List, Optional
-
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed
@@ -58,7 +58,8 @@ except ImportError:
     raise ImportError
 
 
-C_POWER_RANGE = torch.linspace(-6, 5, 45)
+# Reduce sweep size for faster dev runs; adjust to your needs
+C_POWER_RANGE = torch.linspace(-6, 5, 13)
 _CPU_DEVICE = torch.device("cpu")
 
 
@@ -142,7 +143,7 @@ class LogRegModule(nn.Module):
         self.estimator.fit(train_features, train_labels)
 
 
-def evaluate_logreg_model(*, logreg_model, test_metric, test_data_loader, save_results_func=None):
+def evaluate_logreg_model(*, logreg_model, test_metric, test_data_loader, save_results_func=None, verbose=False):
     key = "metrics"  # We need only one key as we have only one metric
     postprocessors, metrics = {key: logreg_model}, {key: test_metric}
     _, eval_metrics, accumulated_results = evaluate(
@@ -155,6 +156,185 @@ def evaluate_logreg_model(*, logreg_model, test_metric, test_data_loader, save_r
     )
     if save_results_func is not None:
         save_results_func(**accumulated_results[key])
+    
+    # Compute additional binary classification metrics
+    from sklearn.metrics import (
+        balanced_accuracy_score,
+        matthews_corrcoef,
+        roc_auc_score,
+        f1_score,
+        precision_score,
+        recall_score,
+        confusion_matrix
+    )
+    
+    # NumPy is already imported at module level, but we need to ensure it's accessible
+    import numpy as np
+    
+    # Collect all predictions and targets
+    logreg_model.eval()
+    all_preds = []
+    all_targets = []
+    all_probas = []
+    
+    with torch.no_grad():
+        for batch in test_data_loader:
+            if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                samples, targets = batch
+            else:
+                samples = batch
+                targets = None
+            
+            # Get predictions
+            output = logreg_model(samples, targets)
+            probas = output["preds"]
+            preds = probas.argmax(dim=-1)
+            
+            all_preds.append(preds.cpu())
+            all_probas.append(probas.cpu())
+            
+            if targets is not None:
+                # Handle DatasetWithEnumeratedTargets collate behavior and other target shapes
+                batch_size = preds.shape[0]
+                targets_tensor: Optional[torch.Tensor] = None
+
+                if isinstance(targets, torch.Tensor):
+                    # Single tensor of labels
+                    if targets.numel() == 1:
+                        targets_tensor = targets.reshape(1).repeat(batch_size)
+                    else:
+                        targets_tensor = targets.view(-1)
+                elif isinstance(targets, (list, tuple)):
+                    # torch default collate over (index, label) tuples produces a tuple of two tensors
+                    if (
+                        len(targets) == 2
+                        and isinstance(targets[0], torch.Tensor)
+                        and isinstance(targets[1], torch.Tensor)
+                        and targets[0].numel() == targets[1].numel()
+                    ):
+                        # Use the second tensor which contains labels
+                        targets_tensor = targets[1].view(-1)
+                    elif len(targets) > 0 and isinstance(targets[0], (tuple, list)) and len(targets[0]) == 2:
+                        # List of (index, label) pairs
+                        labels = [t[1] for t in targets]
+                        if len(labels) > 0 and isinstance(labels[0], torch.Tensor):
+                            stacked = [t.reshape(-1) for t in labels]
+                            targets_tensor = torch.cat(stacked).view(-1)
+                        else:
+                            targets_tensor = torch.tensor(labels).view(-1)
+                    elif len(targets) > 0 and isinstance(targets[0], torch.Tensor):
+                        # List/tuple of tensors; assume already labels
+                        stacked = [t.reshape(-1) for t in targets]
+                        targets_tensor = torch.cat(stacked).view(-1)
+                    else:
+                        # Fallback: list of python scalars
+                        targets_tensor = torch.tensor(list(targets)).view(-1)
+                else:
+                    # Python scalar
+                    targets_tensor = torch.tensor([targets]).repeat(batch_size)
+
+                # Align length to batch size (truncate or pad last value)
+                if targets_tensor is not None:
+                    if targets_tensor.numel() < batch_size:
+                        pad_val = targets_tensor[-1] if targets_tensor.numel() > 0 else torch.tensor(0)
+                        pad_count = batch_size - targets_tensor.numel()
+                        pad = pad_val.repeat(pad_count)
+                        targets_tensor = torch.cat([targets_tensor, pad])
+                    elif targets_tensor.numel() > batch_size:
+                        targets_tensor = targets_tensor[:batch_size]
+                    all_targets.append(targets_tensor.cpu())
+    
+    if len(all_targets) > 0:
+        all_preds = torch.cat(all_preds)
+        all_targets = torch.cat(all_targets)
+        all_probas = torch.cat(all_probas)
+        
+        # Convert to numpy for sklearn
+        preds_np = all_preds.numpy()
+        targets_np = all_targets.numpy()
+        probas_full = all_probas.numpy()  # (N, C)
+        
+        # Calculate metrics with robust error handling
+        unique_classes = np.unique(targets_np)
+        
+        # Confusion matrix for detailed analysis (only print if verbose)
+        if verbose:
+            try:
+                cm = confusion_matrix(targets_np, preds_np, labels=sorted(unique_classes.tolist()))
+                class_names = [f"Class_{i}" for i in sorted(unique_classes.tolist())]
+                logger.info("=" * 60)
+                logger.info("Confusion Matrix:")
+                logger.info(f"                 Predicted")
+                logger.info(f"                 {'   '.join(class_names)}")
+                for i, row in enumerate(cm):
+                    logger.info(f"Actual {class_names[i]}: {'   '.join([f'{val:3d}' for val in row])}")
+                logger.info("=" * 60)
+                logger.info(f"Actual class distribution: {dict(zip([f'Class_{i}' for i in unique_classes], np.bincount(targets_np.astype(int))))}")
+                logger.info(f"Predicted class distribution: {dict(zip([f'Class_{i}' for i in unique_classes], np.bincount(preds_np.astype(int))))}")
+                logger.info("=" * 60)
+            except Exception as e:
+                logger.warning(f"Failed to compute confusion matrix: {e}")
+        
+        # Balanced accuracy
+        try:
+            balanced_acc = balanced_accuracy_score(targets_np, preds_np)
+        except Exception as e:
+            logger.warning(f"Failed to compute balanced_accuracy: {e}")
+            balanced_acc = float("nan")
+        
+        # MCC (handles all cases automatically)
+        try:
+            mcc = matthews_corrcoef(targets_np, preds_np)
+        except Exception as e:
+            logger.warning(f"Failed to compute mcc: {e}")
+            mcc = float("nan")
+        
+        # AUC-ROC: handle binary vs multiclass and tiny subsets
+        try:
+            if probas_full.ndim == 2 and probas_full.shape[1] == 2 and len(unique_classes) == 2:
+                # Binary: use positive class probabilities
+                auc_roc = roc_auc_score(targets_np, probas_full[:, 1])
+            elif probas_full.ndim == 2 and probas_full.shape[1] > 2 and len(unique_classes) > 2:
+                # Multiclass: use OvR on full probability matrix
+                auc_roc = roc_auc_score(targets_np, probas_full, multi_class="ovr")
+            else:
+                # Undefined AUC (e.g., single-class tiny split)
+                auc_roc = float("nan")
+        except Exception as e:
+            logger.warning(f"Failed to compute auc_roc: {e}")
+            auc_roc = float("nan")
+        
+        # Determine average method based on number of classes
+        num_classes = len(unique_classes)
+        avg_method = 'binary' if num_classes == 2 else 'macro'
+        
+        # F1, Precision, Recall
+        try:
+            f1 = f1_score(targets_np, preds_np, average=avg_method)
+        except Exception as e:
+            logger.warning(f"Failed to compute f1: {e}")
+            f1 = float("nan")
+        
+        try:
+            precision = precision_score(targets_np, preds_np, average=avg_method)
+        except Exception as e:
+            logger.warning(f"Failed to compute precision: {e}")
+            precision = float("nan")
+        
+        try:
+            recall = recall_score(targets_np, preds_np, average=avg_method)
+        except Exception as e:
+            logger.warning(f"Failed to compute recall: {e}")
+            recall = float("nan")
+        
+        # Add to eval_metrics (only add if not NaN to avoid issues)
+        eval_metrics["metrics"]["balanced_accuracy"] = torch.tensor(balanced_acc if not np.isnan(balanced_acc) else 0.0)
+        eval_metrics["metrics"]["mcc"] = torch.tensor(mcc if not np.isnan(mcc) else 0.0)
+        eval_metrics["metrics"]["auc_roc"] = torch.tensor(auc_roc if not np.isnan(auc_roc) else 0.0)
+        eval_metrics["metrics"]["f1"] = torch.tensor(f1 if not np.isnan(f1) else 0.0)
+        eval_metrics["metrics"]["precision"] = torch.tensor(precision if not np.isnan(precision) else 0.0)
+        eval_metrics["metrics"]["recall"] = torch.tensor(recall if not np.isnan(recall) else 0.0)
+    
     return eval_metrics
 
 
@@ -242,6 +422,7 @@ def get_best_logreg_with_features(
     val_metric,
     concatenate_train_val: bool,
     train_config: TrainConfig,
+    output_dir: Optional[str] = None,
 ):
     val_data_loader = make_logreg_data_loader(
         train_config.batch_size, train_config.num_workers, val_features, val_labels
@@ -266,6 +447,21 @@ def get_best_logreg_with_features(
         train_features=train_features,
         train_labels=train_labels,
     )
+    
+    # Save checkpoint if output_dir is provided
+    if output_dir and concatenate_train_val and train_config.train_features_device == "cpu":
+        try:
+            import joblib
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+            checkpoint_path = os.path.join(output_dir, "final_logreg_model.pkl")
+            joblib.dump(logreg_model.estimator, checkpoint_path)
+            logger.info(f"Saved final logistic regression model to {checkpoint_path}")
+        except ImportError:
+            logger.warning("joblib not available, skipping model checkpoint")
+        except Exception as e:
+            logger.warning(f"Failed to save checkpoint: {e}")
+    
     return logreg_model
 
 
@@ -350,10 +546,15 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
     model.cpu()  # all features are extracted, we won't use the backbone anymore
     torch.cuda.empty_cache()
 
-    # Setting up metrics
-    val_metric = build_classification_metric(config.train.val_metric_type, num_classes=num_classes, dataset=val_dataset)
+    # Setting up metrics (ensure at least 2 classes for binary tasks on tiny subsets)
+    effective_num_classes = max(2, int(num_classes))
+    val_metric = build_classification_metric(
+        config.train.val_metric_type, num_classes=effective_num_classes, dataset=val_dataset
+    )
     test_metric_type = config.eval.test_metric_type or config.train.val_metric_type
-    test_metric = build_classification_metric(test_metric_type, num_classes=num_classes, dataset=test_dataset)
+    test_metric = build_classification_metric(
+        test_metric_type, num_classes=effective_num_classes, dataset=test_dataset
+    )
 
     # Setting up save results function
     save_results_func = None
@@ -362,6 +563,8 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
 
     results_dict = {}
     for _try in train_data_dict.keys():
+        # Always train sklearn on CPU regardless of feature extraction device since sklearn only works for CPU
+        cpu_train_config = replace(config.train, train_features_device="cpu")
         logreg_model = get_best_logreg_with_features(
             train_features=train_data_dict[_try]["train_features"],
             train_labels=train_data_dict[_try]["train_labels"],
@@ -369,7 +572,8 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
             val_labels=val_labels,
             val_metric=val_metric,
             concatenate_train_val=not config.few_shot.enable,
-            train_config=config.train,
+            train_config=cpu_train_config,
+            output_dir=config.output_dir,
         )
         if len(train_data_dict) > 1 and save_results_func is not None:  # add suffix
             split_results_saver = partial(save_results_func, filename_suffix=str(_try))
@@ -381,6 +585,7 @@ def eval_log_regression_with_model(*, model: torch.nn.Module, autocast_dtype, co
             test_metric=test_metric.clone(),
             test_data_loader=test_data_loader,
             save_results_func=split_results_saver,
+            verbose=True,  # Print confusion matrix for final test evaluation
         )
         results_dict[_try] = {k: v.item() * 100.0 for k, v in eval_metrics["metrics"].items()}
 

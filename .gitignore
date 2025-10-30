@@ -9,10 +9,14 @@ dist/
 **/notebooks
 
 # Ignore shell scripts
-*.sh
+
 
 # Ignore swap files
 *.swp
 
 # Ignore vscode directory
 .vscode/
+
+.logs/
+.runs/
+.weights/

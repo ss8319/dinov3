@@ -164,6 +164,29 @@ def all_gather_and_flatten(tensor_rank):
 
 
 def extract_features(model, dataset, batch_size, num_workers, gather_on_cpu=False):
+    # Check if this is a SliceAggregationDataset (3D volumes requiring slice aggregation)
+    # Note: dataset might be wrapped in torch.utils.data.Subset, so we need to unwrap it
+    from dinov3.data.datasets.adni_3d_aggregation import SliceAggregationDataset
+    
+    actual_dataset = dataset
+    # Unwrap Subset to get the underlying dataset
+    if hasattr(dataset, 'dataset'):
+        actual_dataset = dataset.dataset
+    
+    if isinstance(actual_dataset, SliceAggregationDataset):
+        logger.info("Detected SliceAggregationDataset - using slice-wise aggregation")
+        from dinov3.data.datasets.adni_3d_aggregation import extract_features_with_slice_aggregation
+        # Extract features with slice aggregation (returns already gathered features)
+        features, labels = extract_features_with_slice_aggregation(
+            model=model,
+            dataset=dataset,  # Pass the original (possibly wrapped) dataset
+            batch_size=batch_size,
+            num_workers=num_workers,
+            device="cuda" if not gather_on_cpu else "cpu"
+        )
+        return features, labels
+    
+    # Standard 2D image feature extraction
     dataset_with_enumerated_targets = DatasetWithEnumeratedTargets(dataset)
     sample_count = len(dataset_with_enumerated_targets)
     data_loader = make_data_loader(

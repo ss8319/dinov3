@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, NYU
+from .datasets import ADE20K, ADNI, CocoCaptions, ImageNet, ImageNet22k, NYU
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
 logger = logging.getLogger("dinov3")
@@ -48,11 +48,15 @@ def _parse_dataset_str(dataset_str: str):
 
     name = tokens[0]
     kwargs = {}
+    agg_params = {}
 
     for token in tokens[1:]:
         key, value = token.split("=")
-        assert key in ("root", "extra", "split")
-        kwargs[key] = value
+        # Allow csv_filename for ADNI datasets and aggregation params
+        if key in ("root", "extra", "split", "csv_filename"):
+            kwargs[key] = value
+        elif key in ("slice_axis", "stride"):
+            agg_params[key] = int(value)
 
     if name == "ImageNet":
         class_ = ImageNet
@@ -72,10 +76,14 @@ def _parse_dataset_str(dataset_str: str):
         class_ = NYU
         if "split" in kwargs:
             kwargs["split"] = NYU.Split[kwargs["split"]]
+    elif name == "ADNI":
+        class_ = ADNI
+        if "split" in kwargs:
+            kwargs["split"] = ADNI.Split[kwargs["split"]]
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 
-    return class_, kwargs
+    return class_, kwargs, agg_params
 
 
 def make_dataset(
@@ -99,19 +107,46 @@ def make_dataset(
     """
     logger.info(f'using dataset: "{dataset_str}"')
 
-    class_, kwargs = _parse_dataset_str(dataset_str)
-    dataset = class_(transform=transform, target_transform=target_transform, transforms=transforms, **kwargs)
+    class_, kwargs, agg_params = _parse_dataset_str(dataset_str)
+    
+    # For ADNI datasets, always use slice aggregation
+    if class_ == ADNI:
+        from dinov3.data.datasets.adni_3d_aggregation import SliceAggregationDataset
+        from torchvision.datasets.vision import StandardTransform
+        
+        # Create base ADNI dataset (no transforms - it's just an index provider)
+        base_dataset = class_(**kwargs)
+        
+        # Wrap with slice aggregation
+        slice_axis = agg_params.get("slice_axis", 0)  # default: sagittal
+        stride = agg_params.get("stride", 2)  # default: every 2nd slice
+        
+        logger.info(f"Wrapping ADNI with SliceAggregationDataset (slice_axis={slice_axis}, stride={stride})")
+        dataset = SliceAggregationDataset(
+            base_dataset=base_dataset,
+            transform=transform,
+            target_transform=target_transform,
+            slice_axis=slice_axis,
+            stride=stride
+        )
+        
+        # Set StandardTransform for full torchvision compatibility
+        dataset.transform = transform
+        dataset.target_transform = target_transform
+        dataset.transforms = StandardTransform(transform, target_transform)
+    else:
+        # Standard dataset creation
+        dataset = class_(transform=transform, target_transform=target_transform, transforms=transforms, **kwargs)
+        
+        # Aggregated datasets do not expose (yet) these attributes, so add them.
+        if not hasattr(dataset, "transform"):
+            dataset.transform = transform
+        if not hasattr(dataset, "target_transform"):
+            dataset.target_transform = target_transform
+        if not hasattr(dataset, "transforms"):
+            dataset.transforms = transforms
 
     logger.info(f"# of dataset samples: {len(dataset):,d}")
-
-    # Aggregated datasets do not expose (yet) these attributes, so add them.
-    if not hasattr(dataset, "transform"):
-        dataset.transform = transform
-    if not hasattr(dataset, "target_transform"):
-        dataset.target_transform = target_transform
-    if not hasattr(dataset, "transforms"):
-        dataset.transforms = transforms
-
     return dataset
 
 
